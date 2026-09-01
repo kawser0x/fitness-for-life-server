@@ -146,6 +146,9 @@ async function run() {
     app.patch("/api/classes/:id", async (req, res) => {
       try {
         const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Class ID" });
+        }
         const updates = req.body;
 
         if (updates.price) {
@@ -175,10 +178,13 @@ async function run() {
       }
     });
 
-    // 5. Delete a Class by ID (Trainer or Admin Action)
+    // 5. Delete a Class by ID
     app.delete("/api/classes/:id", async (req, res) => {
       try {
         const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Class ID" });
+        }
         const query = { _id: new ObjectId(id) };
         const result = await classesCollection.deleteOne(query);
 
@@ -209,7 +215,27 @@ async function run() {
       }
     });
 
-    // 7. Get All Public Approved Classes
+    // 7. Get Single Class Details by ID (Explicit route /api/classes/details/:id)
+    app.get("/api/classes/details/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Class ID format" });
+        }
+        const classData = await classesCollection.findOne({ _id: new ObjectId(id) });
+
+        if (!classData) {
+          return res.status(404).json({ error: "Class details not found" });
+        }
+
+        res.json(classData);
+      } catch (error) {
+        console.error("Error fetching class details:", error);
+        res.status(500).json({ error: "Failed to fetch class details" });
+      }
+    });
+
+    // 8. Get All Public Approved Classes
     app.get("/api/classes", async (req, res) => {
       try {
         const { status, search, category, page = 1, limit = 10 } = req.query;
@@ -251,11 +277,31 @@ async function run() {
       }
     });
 
+    // 9. Get Single Class Details by ID (Direct Route /api/classes/:id)
+    app.get("/api/classes/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Class ID format" });
+        }
+        const classData = await classesCollection.findOne({ _id: new ObjectId(id) });
+
+        if (!classData) {
+          return res.status(404).json({ error: "Class details not found" });
+        }
+
+        res.json(classData);
+      } catch (error) {
+        console.error("Error fetching class details:", error);
+        res.status(500).json({ error: "Failed to fetch class details" });
+      }
+    });
+
     // ==========================================
     // ADMIN MANAGEMENT ENDPOINTS (CLASSES & FORUM)
     // ==========================================
 
-    // 1. Get All Classes for Admin View (Pending, Approved, Rejected)
+    // 1. Get All Classes for Admin View
     app.get("/api/admin/classes", async (req, res) => {
       try {
         const classes = await classesCollection.find().sort({ createdAt: -1 }).toArray();
@@ -270,7 +316,10 @@ async function run() {
     app.patch("/api/admin/classes/:id/status", async (req, res) => {
       try {
         const { id } = req.params;
-        const { status } = req.body; // "Approved" | "Rejected"
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Class ID" });
+        }
+        const { status } = req.body;
 
         if (!["Approved", "Rejected"].includes(status)) {
           return res.status(400).json({ error: "Invalid status option" });
@@ -314,10 +363,13 @@ async function run() {
       }
     });
 
-    // 5. Block / Unblock User Toggle (Soft Block)
+    // 5. Block / Unblock User Toggle
     app.patch("/api/admin/users/:id/status", async (req, res) => {
       try {
         const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid User ID" });
+        }
         const { status } = req.body;
 
         if (!["active", "blocked"].includes(status)) {
@@ -344,6 +396,9 @@ async function run() {
     app.patch("/api/admin/users/:id/role", async (req, res) => {
       try {
         const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid User ID" });
+        }
         const { role } = req.body;
 
         const filter = { _id: new ObjectId(id) };
@@ -396,7 +451,7 @@ async function run() {
       }
     });
 
-    // 8. Get All Trainer Applications (Admin View)
+    // 8. Get All Trainer Applications
     app.get("/api/admin/trainer-applications", async (req, res) => {
       try {
         const apps = await trainerAppsCollection.find().sort({ createdAt: -1 }).toArray();
@@ -411,6 +466,9 @@ async function run() {
     app.patch("/api/admin/trainer-applications/:id/review", async (req, res) => {
       try {
         const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Application ID" });
+        }
         const { action, feedback } = req.body;
 
         if (!["approve", "reject"].includes(action)) {
@@ -493,7 +551,7 @@ async function run() {
       }
     });
 
-    // 2. Get Forum Posts authored by a specific trainer/email
+    // 2. Get Forum Posts authored by a specific trainer
     app.get("/api/forum/trainer/:email", async (req, res) => {
       try {
         const { email } = req.params;
@@ -540,6 +598,9 @@ async function run() {
     app.get("/api/forum/:id", async (req, res) => {
       try {
         const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Post ID" });
+        }
         const post = await forumPostsCollection.findOne({ _id: new ObjectId(id) });
 
         if (!post) {
@@ -557,6 +618,9 @@ async function run() {
     app.delete("/api/forum/:id", async (req, res) => {
       try {
         const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Post ID" });
+        }
         const result = await forumPostsCollection.deleteOne({ _id: new ObjectId(id) });
 
         if (result.deletedCount === 0) {
@@ -576,6 +640,9 @@ async function run() {
     app.post("/api/forum/:id/vote", async (req, res) => {
       try {
         const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Post ID" });
+        }
         const { userEmail, type } = req.body;
 
         if (!userEmail || !["like", "dislike"].includes(type)) {
@@ -671,6 +738,9 @@ async function run() {
     app.patch("/api/forum/comments/:commentId", async (req, res) => {
       try {
         const { commentId } = req.params;
+        if (!ObjectId.isValid(commentId)) {
+          return res.status(400).json({ error: "Invalid Comment ID" });
+        }
         const { commentText, userEmail } = req.body;
 
         const comment = await commentsCollection.findOne({ _id: new ObjectId(commentId) });
@@ -696,6 +766,9 @@ async function run() {
     app.delete("/api/forum/comments/:commentId", async (req, res) => {
       try {
         const { commentId } = req.params;
+        if (!ObjectId.isValid(commentId)) {
+          return res.status(400).json({ error: "Invalid Comment ID" });
+        }
         const result = await commentsCollection.deleteOne({ _id: new ObjectId(commentId) });
 
         if (result.deletedCount === 0) {
