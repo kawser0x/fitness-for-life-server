@@ -35,10 +35,233 @@ async function run() {
     const forumPostsCollection = database.collection("forumPosts");
     const commentsCollection = database.collection("comments");
     const trainerAppsCollection = database.collection("trainerApplications");
+    const favoritesCollection = database.collection("favorites");
 
     // Root route
     app.get("/", (req, res) => {
       res.send("Fitness For Life Server is running...");
+    });
+
+    // ==========================================
+    // AUTHENTICATION & USER SYNC ENDPOINTS
+    // ==========================================
+
+    // 1. Sync User Role and Details upon Signup/Login
+    app.post("/api/user/sync", async (req, res) => {
+      try {
+        const { email, role, name, image } = req.body;
+        if (!email) return res.status(400).json({ error: "User email required" });
+
+        // Hardcoded admin email override per specs
+        let finalRole = role || "user";
+        if (email.toLowerCase() === "admin@ironpulse.com") {
+          finalRole = "admin";
+        }
+
+        const filter = { email };
+        const existingUser = await usersCollection.findOne(filter);
+
+        if (existingUser) {
+          // If existing user already has a specific role (like admin or approved trainer), keep it unless explicitly changing to trainer
+          if (existingUser.role && existingUser.role !== "user" && finalRole === "user") {
+            finalRole = existingUser.role;
+          }
+          await usersCollection.updateOne(filter, {
+            $set: {
+              role: finalRole,
+              name: name || existingUser.name,
+              image: image || existingUser.image,
+              updatedAt: new Date(),
+            },
+          });
+        } else {
+          await usersCollection.insertOne({
+            email,
+            name: name || email.split("@")[0],
+            image: image || "",
+            role: finalRole,
+            status: "active",
+            createdAt: new Date(),
+          });
+        }
+
+        res.json({ message: "User synced", role: finalRole });
+      } catch (error) {
+        console.error("Error syncing user role:", error);
+        res.status(500).json({ error: "Failed to sync user" });
+      }
+    });
+
+    // 2. Fetch User Role by Email
+    app.get("/api/user/role/:email", async (req, res) => {
+      try {
+        const { email } = req.params;
+        if (email.toLowerCase() === "admin@ironpulse.com") {
+          return res.json({ role: "admin", status: "active" });
+        }
+
+        const userObj = await usersCollection.findOne({ email });
+        if (!userObj) {
+          return res.json({ role: "user", status: "active" });
+        }
+
+        res.json({
+          role: userObj.role || "user",
+          status: userObj.status || "active",
+          name: userObj.name,
+          image: userObj.image,
+        });
+      } catch (error) {
+        console.error("Error fetching user role:", error);
+        res.status(500).json({ error: "Failed to fetch user role" });
+      }
+    });
+
+    // ==========================================
+    // USER MEMBER API ENDPOINTS
+    // ==========================================
+
+    // 1. Get User Dashboard Stats by Email
+    app.get("/api/user/stats/:email", async (req, res) => {
+      try {
+        const { email } = req.params;
+        const totalBookedClasses = await bookingsCollection.countDocuments({ userEmail: email });
+        const totalFavorites = await favoritesCollection.countDocuments({ userEmail: email });
+
+        const appData = await trainerAppsCollection.findOne({ userEmail: email });
+        const userData = await usersCollection.findOne({ email });
+
+        const trainerApplicationStatus = appData
+          ? appData.status
+          : userData?.trainerApplicationStatus || "Not Applied";
+        const adminFeedback = appData ? appData.feedback || "" : userData?.trainerFeedback || "";
+
+        res.json({
+          totalBookedClasses,
+          totalFavorites,
+          trainerApplicationStatus,
+          adminFeedback,
+        });
+      } catch (error) {
+        console.error("Error fetching user stats:", error);
+        res.status(500).json({ error: "Failed to fetch user stats" });
+      }
+    });
+
+    // 2. Get User Booked Classes
+    app.get("/api/user/bookings/:email", async (req, res) => {
+      try {
+        const { email } = req.params;
+        const bookings = await bookingsCollection
+          .find({ userEmail: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json(bookings);
+      } catch (error) {
+        console.error("Error fetching user bookings:", error);
+        res.status(500).json({ error: "Failed to fetch bookings" });
+      }
+    });
+
+    // 3. Create a Booking (Payment / Reservation)
+    app.post("/api/user/bookings", async (req, res) => {
+      try {
+        const { userEmail, classId, className, price, image, trainerName, classSchedule } = req.body;
+
+        if (!userEmail || !classId) {
+          return res.status(400).json({ error: "User email and class ID required" });
+        }
+
+        // Soft Block check
+        const userObj = await usersCollection.findOne({ email: userEmail });
+        if (userObj && userObj.status === "blocked") {
+          return res.status(403).json({ error: "Action restricted by Admin" });
+        }
+
+        const existingBooking = await bookingsCollection.findOne({ userEmail, classId });
+        if (existingBooking) {
+          return res.status(400).json({ error: "You have already booked this class!" });
+        }
+
+        const newBooking = {
+          userEmail,
+          classId,
+          className: className || "Fitness Class",
+          price: parseFloat(price) || 0,
+          image: image || "",
+          trainerName: trainerName || "Certified Trainer",
+          classSchedule: classSchedule || "Schedule TBD",
+          paymentStatus: "Paid",
+          createdAt: new Date(),
+        };
+
+        const result = await bookingsCollection.insertOne(newBooking);
+
+        // Increment booking count on class document
+        if (ObjectId.isValid(classId)) {
+          await classesCollection.updateOne(
+            { _id: new ObjectId(classId) },
+            { $inc: { bookingCount: 1 } }
+          );
+        }
+
+        res.status(201).json({ message: "Booking confirmed", insertedId: result.insertedId });
+      } catch (error) {
+        console.error("Error creating booking:", error);
+        res.status(500).json({ error: "Failed to process booking" });
+      }
+    });
+
+    // 4. Get User Favorites
+    app.get("/api/user/favorites/:email", async (req, res) => {
+      try {
+        const { email } = req.params;
+        const favorites = await favoritesCollection
+          .find({ userEmail: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json(favorites);
+      } catch (error) {
+        console.error("Error fetching favorites:", error);
+        res.status(500).json({ error: "Failed to fetch favorites" });
+      }
+    });
+
+    // 5. Add / Remove Favorite Toggle
+    app.post("/api/user/favorites/toggle", async (req, res) => {
+      try {
+        const { userEmail, classId, className, image, category, price, duration, difficultyLevel } = req.body;
+
+        if (!userEmail || !classId) {
+          return res.status(400).json({ error: "User email and class ID required" });
+        }
+
+        const existingFav = await favoritesCollection.findOne({ userEmail, classId });
+
+        if (existingFav) {
+          await favoritesCollection.deleteOne({ _id: existingFav._id });
+          return res.json({ isFavorite: false, message: "Removed from favorites" });
+        } else {
+          const newFav = {
+            userEmail,
+            classId,
+            className: className || "Fitness Class",
+            image: image || "",
+            category: category || "General",
+            price: parseFloat(price) || 0,
+            duration: duration || "45 mins",
+            difficultyLevel: difficultyLevel || "Intermediate",
+            createdAt: new Date(),
+          };
+          await favoritesCollection.insertOne(newFav);
+          return res.json({ isFavorite: true, message: "Added to favorites" });
+        }
+      } catch (error) {
+        console.error("Error toggling favorite:", error);
+        res.status(500).json({ error: "Failed to toggle favorite" });
+      }
     });
 
     // ==========================================
@@ -76,7 +299,7 @@ async function run() {
           description,
           trainerEmail,
           trainerName: trainerName || "Trainer",
-          status: "Pending", 
+          status: "Pending",
           bookingCount: 0,
           createdAt: new Date(),
         };
@@ -215,7 +438,7 @@ async function run() {
       }
     });
 
-    // 7. Get Single Class Details by ID (Explicit route /api/classes/details/:id)
+    // 7. Get Single Class Details by ID
     app.get("/api/classes/details/:id", async (req, res) => {
       try {
         const { id } = req.params;
@@ -424,6 +647,12 @@ async function run() {
 
         if (!userEmail || !experience || !specialty) {
           return res.status(400).json({ error: "Missing required application fields" });
+        }
+
+        // Soft block check for trainer application
+        const userObj = await usersCollection.findOne({ email: userEmail });
+        if (userObj && userObj.status === "blocked") {
+          return res.status(403).json({ error: "Action restricted by Admin" });
         }
 
         const newApp = {
