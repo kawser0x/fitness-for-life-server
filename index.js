@@ -34,15 +34,14 @@ async function run() {
     const bookingsCollection = database.collection("bookings");
     const forumPostsCollection = database.collection("forumPosts");
     const commentsCollection = database.collection("comments");
+    const trainerAppsCollection = database.collection("trainerApplications");
 
     // Root route
     app.get("/", (req, res) => {
       res.send("Fitness For Life Server is running...");
     });
 
-    // ==========================================
     // TRAINER & CLASSES API ENDPOINTS
-    // ==========================================
 
     // 1. Create a new Class (Trainer requirement: default status "Pending")
     app.post("/api/classes", async (req, res) => {
@@ -75,7 +74,7 @@ async function run() {
           description,
           trainerEmail,
           trainerName: trainerName || "Trainer",
-          status: "Pending", // Mandatory requirement: default status "Pending"
+          status: "Pending", 
           bookingCount: 0,
           createdAt: new Date(),
         };
@@ -109,7 +108,7 @@ async function run() {
       }
     });
 
-    // 3. Get Trainer Stats (Total Classes Created & Total Enrolled Students)
+    // 3. Get Trainer Stats
     app.get("/api/trainer/stats/:email", async (req, res) => {
       try {
         const { email } = req.params;
@@ -141,7 +140,7 @@ async function run() {
       }
     });
 
-    // 4. Update a Class by ID (Trainer Action)
+    // 4. Update a Class by ID
     app.patch("/api/classes/:id", async (req, res) => {
       try {
         const { id } = req.params;
@@ -174,7 +173,7 @@ async function run() {
       }
     });
 
-    // 5. Delete a Class by ID (Trainer Action)
+    // 5. Delete a Class by ID
     app.delete("/api/classes/:id", async (req, res) => {
       try {
         const { id } = req.params;
@@ -192,7 +191,7 @@ async function run() {
       }
     });
 
-    // 6. View Attendees / Students for a specific class (Trainer Action)
+    // 6. View Attendees / Students for a specific class
     app.get("/api/classes/:id/attendees", async (req, res) => {
       try {
         const { id } = req.params;
@@ -208,7 +207,7 @@ async function run() {
       }
     });
 
-    // 7. Get All Public Approved Classes (with Search & Category Filter)
+    // 7. Get All Public Approved Classes
     app.get("/api/classes", async (req, res) => {
       try {
         const { status, search, category, page = 1, limit = 10 } = req.query;
@@ -250,27 +249,169 @@ async function run() {
       }
     });
 
-    // 8. Get Single Class Details by ID
-    app.get("/api/classes/details/:id", async (req, res) => {
+    // ADMIN & USER MANAGEMENT ENDPOINTS
+
+    // 1. Get All Registered Users (Admin)
+    app.get("/api/admin/users", async (req, res) => {
       try {
-        const { id } = req.params;
-        const classData = await classesCollection.findOne({ _id: new ObjectId(id) });
-
-        if (!classData) {
-          return res.status(404).json({ error: "Class not found" });
-        }
-
-        res.json(classData);
+        const users = await usersCollection.find().sort({ createdAt: -1 }).toArray();
+        res.json(users);
       } catch (error) {
-        console.error("Error fetching class details:", error);
-        res.status(500).json({ error: "Failed to fetch class details" });
+        console.error("Error fetching users:", error);
+        res.status(500).json({ error: "Failed to fetch users" });
       }
     });
 
-    
+    // 2. Block / Unblock User Toggle (Soft Block)
+    app.patch("/api/admin/users/:id/status", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status } = req.body; // "active" | "blocked"
+
+        if (!["active", "blocked"].includes(status)) {
+          return res.status(400).json({ error: "Invalid status" });
+        }
+
+        const filter = { _id: new ObjectId(id) };
+        const result = await usersCollection.updateOne(filter, {
+          $set: { status, updatedAt: new Date() },
+        });
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        res.json({ message: `User status updated to ${status}` });
+      } catch (error) {
+        console.error("Error updating user status:", error);
+        res.status(500).json({ error: "Failed to update user status" });
+      }
+    });
+
+    // 3. Make Admin (Promote Standard User to Admin)
+    app.patch("/api/admin/users/:id/role", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { role } = req.body; // e.g. "admin"
+
+        const filter = { _id: new ObjectId(id) };
+        const result = await usersCollection.updateOne(filter, {
+          $set: { role, updatedAt: new Date() },
+        });
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        res.json({ message: `User role updated to ${role}` });
+      } catch (error) {
+        console.error("Error updating user role:", error);
+        res.status(500).json({ error: "Failed to promote user" });
+      }
+    });
+
+    // 4. Submit Trainer Application (User Action)
+    app.post("/api/trainer/apply", async (req, res) => {
+      try {
+        const { userEmail, userName, experience, specialty, availableTime } = req.body;
+
+        if (!userEmail || !experience || !specialty) {
+          return res.status(400).json({ error: "Missing required application fields" });
+        }
+
+        const newApp = {
+          userEmail,
+          userName: userName || "Applicant",
+          experience,
+          specialty,
+          availableTime: availableTime || "Weekdays & Weekends",
+          status: "Pending",
+          feedback: "",
+          createdAt: new Date(),
+        };
+
+        const result = await trainerAppsCollection.insertOne(newApp);
+
+        // Update user application status in users collection as well
+        await usersCollection.updateOne(
+          { email: userEmail },
+          { $set: { trainerApplicationStatus: "Pending" } }
+        );
+
+        res.status(201).json({ message: "Trainer application submitted", insertedId: result.insertedId });
+      } catch (error) {
+        console.error("Error submitting trainer application:", error);
+        res.status(500).json({ error: "Failed to submit application" });
+      }
+    });
+
+    // 5. Get All Trainer Applications (Admin View)
+    app.get("/api/admin/trainer-applications", async (req, res) => {
+      try {
+        const apps = await trainerAppsCollection.find().sort({ createdAt: -1 }).toArray();
+        res.json(apps);
+      } catch (error) {
+        console.error("Error fetching trainer applications:", error);
+        res.status(500).json({ error: "Failed to fetch applications" });
+      }
+    });
+
+    // 6. Review Trainer Application (Approve or Reject with Feedback)
+    app.patch("/api/admin/trainer-applications/:id/review", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { action, feedback } = req.body; // action: "approve" | "reject"
+
+        if (!["approve", "reject"].includes(action)) {
+          return res.status(400).json({ error: "Invalid review action" });
+        }
+
+        const appFilter = { _id: new ObjectId(id) };
+        const appData = await trainerAppsCollection.findOne(appFilter);
+
+        if (!appData) {
+          return res.status(404).json({ error: "Application not found" });
+        }
+
+        const newStatus = action === "approve" ? "Approved" : "Rejected";
+
+        // 1. Update application status & feedback
+        await trainerAppsCollection.updateOne(appFilter, {
+          $set: {
+            status: newStatus,
+            feedback: feedback || "",
+            reviewedAt: new Date(),
+          },
+        });
+
+        // 2. Update User role & status in usersCollection
+        const userFilter = { email: appData.userEmail };
+        const userUpdate = {
+          $set: {
+            trainerApplicationStatus: newStatus,
+            trainerFeedback: feedback || "",
+          },
+        };
+
+        if (action === "approve") {
+          userUpdate.$set.role = "trainer"; // Promote role to Trainer
+        }
+
+        await usersCollection.updateOne(userFilter, userUpdate);
+
+        res.json({
+          message: `Application ${newStatus.toLowerCase()} successfully`,
+          status: newStatus,
+        });
+      } catch (error) {
+        console.error("Error reviewing trainer application:", error);
+        res.status(500).json({ error: "Failed to review application" });
+      }
+    });
+
     // COMMUNITY FORUM API ENDPOINTS
 
-    // 1. Create a new Forum Post (Trainers & Admins)
+    // 1. Create a new Forum Post
     app.post("/api/forum", async (req, res) => {
       try {
         const { title, image, description, authorEmail, authorName, authorRole } = req.body;
@@ -373,7 +514,6 @@ async function run() {
           return res.status(404).json({ error: "Post not found" });
         }
 
-        // Also delete associated comments
         await commentsCollection.deleteMany({ postId: id });
 
         res.json({ message: "Forum post and comments deleted successfully" });
@@ -383,11 +523,11 @@ async function run() {
       }
     });
 
-    // 6. Like / Dislike Vote Endpoint (One vote per user rule)
+    // 6. Like / Dislike Vote Endpoint
     app.post("/api/forum/:id/vote", async (req, res) => {
       try {
         const { id } = req.params;
-        const { userEmail, type } = req.body; // type: "like" | "dislike"
+        const { userEmail, type } = req.body;
 
         if (!userEmail || !["like", "dislike"].includes(type)) {
           return res.status(400).json({ error: "Invalid vote parameters" });
@@ -454,6 +594,12 @@ async function run() {
 
         if (!userEmail || !commentText) {
           return res.status(400).json({ error: "Comment text and user required" });
+        }
+
+        // Soft Block check for commenting
+        const authorUser = await usersCollection.findOne({ email: userEmail });
+        if (authorUser && authorUser.status === "blocked") {
+          return res.status(403).json({ error: "Action restricted by Admin" });
         }
 
         const newComment = {
