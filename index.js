@@ -41,7 +41,9 @@ async function run() {
       res.send("Fitness For Life Server is running...");
     });
 
+    // ==========================================
     // TRAINER & CLASSES API ENDPOINTS
+    // ==========================================
 
     // 1. Create a new Class (Trainer requirement: default status "Pending")
     app.post("/api/classes", async (req, res) => {
@@ -173,7 +175,7 @@ async function run() {
       }
     });
 
-    // 5. Delete a Class by ID
+    // 5. Delete a Class by ID (Trainer or Admin Action)
     app.delete("/api/classes/:id", async (req, res) => {
       try {
         const { id } = req.params;
@@ -249,9 +251,59 @@ async function run() {
       }
     });
 
-    // ADMIN & USER MANAGEMENT ENDPOINTS
+    // ==========================================
+    // ADMIN MANAGEMENT ENDPOINTS (CLASSES & FORUM)
+    // ==========================================
 
-    // 1. Get All Registered Users (Admin)
+    // 1. Get All Classes for Admin View (Pending, Approved, Rejected)
+    app.get("/api/admin/classes", async (req, res) => {
+      try {
+        const classes = await classesCollection.find().sort({ createdAt: -1 }).toArray();
+        res.json(classes);
+      } catch (error) {
+        console.error("Error fetching admin classes:", error);
+        res.status(500).json({ error: "Failed to fetch classes" });
+      }
+    });
+
+    // 2. Admin Approve or Reject Class Status
+    app.patch("/api/admin/classes/:id/status", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status } = req.body; // "Approved" | "Rejected"
+
+        if (!["Approved", "Rejected"].includes(status)) {
+          return res.status(400).json({ error: "Invalid status option" });
+        }
+
+        const filter = { _id: new ObjectId(id) };
+        const result = await classesCollection.updateOne(filter, {
+          $set: { status, updatedAt: new Date() },
+        });
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "Class not found" });
+        }
+
+        res.json({ message: `Class status updated to ${status}` });
+      } catch (error) {
+        console.error("Error updating class status:", error);
+        res.status(500).json({ error: "Failed to update class status" });
+      }
+    });
+
+    // 3. Get All Forum Posts for Admin Moderation Table
+    app.get("/api/admin/forum-posts", async (req, res) => {
+      try {
+        const posts = await forumPostsCollection.find().sort({ createdAt: -1 }).toArray();
+        res.json(posts);
+      } catch (error) {
+        console.error("Error fetching admin forum posts:", error);
+        res.status(500).json({ error: "Failed to fetch forum posts" });
+      }
+    });
+
+    // 4. Get All Registered Users (Admin)
     app.get("/api/admin/users", async (req, res) => {
       try {
         const users = await usersCollection.find().sort({ createdAt: -1 }).toArray();
@@ -262,11 +314,11 @@ async function run() {
       }
     });
 
-    // 2. Block / Unblock User Toggle (Soft Block)
+    // 5. Block / Unblock User Toggle (Soft Block)
     app.patch("/api/admin/users/:id/status", async (req, res) => {
       try {
         const { id } = req.params;
-        const { status } = req.body; // "active" | "blocked"
+        const { status } = req.body;
 
         if (!["active", "blocked"].includes(status)) {
           return res.status(400).json({ error: "Invalid status" });
@@ -288,11 +340,11 @@ async function run() {
       }
     });
 
-    // 3. Make Admin (Promote Standard User to Admin)
+    // 6. Make Admin
     app.patch("/api/admin/users/:id/role", async (req, res) => {
       try {
         const { id } = req.params;
-        const { role } = req.body; // e.g. "admin"
+        const { role } = req.body;
 
         const filter = { _id: new ObjectId(id) };
         const result = await usersCollection.updateOne(filter, {
@@ -310,7 +362,7 @@ async function run() {
       }
     });
 
-    // 4. Submit Trainer Application (User Action)
+    // 7. Submit Trainer Application
     app.post("/api/trainer/apply", async (req, res) => {
       try {
         const { userEmail, userName, experience, specialty, availableTime } = req.body;
@@ -332,7 +384,6 @@ async function run() {
 
         const result = await trainerAppsCollection.insertOne(newApp);
 
-        // Update user application status in users collection as well
         await usersCollection.updateOne(
           { email: userEmail },
           { $set: { trainerApplicationStatus: "Pending" } }
@@ -345,7 +396,7 @@ async function run() {
       }
     });
 
-    // 5. Get All Trainer Applications (Admin View)
+    // 8. Get All Trainer Applications (Admin View)
     app.get("/api/admin/trainer-applications", async (req, res) => {
       try {
         const apps = await trainerAppsCollection.find().sort({ createdAt: -1 }).toArray();
@@ -356,11 +407,11 @@ async function run() {
       }
     });
 
-    // 6. Review Trainer Application (Approve or Reject with Feedback)
+    // 9. Review Trainer Application
     app.patch("/api/admin/trainer-applications/:id/review", async (req, res) => {
       try {
         const { id } = req.params;
-        const { action, feedback } = req.body; // action: "approve" | "reject"
+        const { action, feedback } = req.body;
 
         if (!["approve", "reject"].includes(action)) {
           return res.status(400).json({ error: "Invalid review action" });
@@ -375,7 +426,6 @@ async function run() {
 
         const newStatus = action === "approve" ? "Approved" : "Rejected";
 
-        // 1. Update application status & feedback
         await trainerAppsCollection.updateOne(appFilter, {
           $set: {
             status: newStatus,
@@ -384,7 +434,6 @@ async function run() {
           },
         });
 
-        // 2. Update User role & status in usersCollection
         const userFilter = { email: appData.userEmail };
         const userUpdate = {
           $set: {
@@ -394,7 +443,7 @@ async function run() {
         };
 
         if (action === "approve") {
-          userUpdate.$set.role = "trainer"; // Promote role to Trainer
+          userUpdate.$set.role = "trainer";
         }
 
         await usersCollection.updateOne(userFilter, userUpdate);
@@ -596,7 +645,6 @@ async function run() {
           return res.status(400).json({ error: "Comment text and user required" });
         }
 
-        // Soft Block check for commenting
         const authorUser = await usersCollection.findOne({ email: userEmail });
         if (authorUser && authorUser.status === "blocked") {
           return res.status(403).json({ error: "Action restricted by Admin" });
