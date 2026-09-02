@@ -37,6 +37,30 @@ async function run() {
     const trainerAppsCollection = database.collection("trainerApplications");
     const favoritesCollection = database.collection("favorites");
 
+    // Auto-migration: sync legacy accounts from 'fitness-for-life' to 'fitnessforlife' safely
+    try {
+      const oldDb = client.db("fitness-for-life");
+      const oldUsers = await oldDb.collection("user").find().toArray();
+      const oldAccounts = await oldDb.collection("account").find().toArray();
+
+      for (const u of oldUsers) {
+        const role = u.role || (u.email?.toLowerCase() === "admin@ironpulse.com" ? "admin" : "user");
+        const userUpdateDoc = { ...u, role };
+        delete userUpdateDoc._id;
+
+        await database.collection("user").updateOne({ email: u.email }, { $set: userUpdateDoc }, { upsert: true });
+        await database.collection("users").updateOne({ email: u.email }, { $set: userUpdateDoc }, { upsert: true });
+      }
+      for (const a of oldAccounts) {
+        const accUpdateDoc = { ...a };
+        delete accUpdateDoc._id;
+        await database.collection("account").updateOne({ userId: a.userId }, { $set: accUpdateDoc }, { upsert: true });
+      }
+      console.log(`✅ Synced ${oldUsers.length} users and ${oldAccounts.length} accounts to fitnessforlife database.`);
+    } catch (migErr) {
+      console.error("Migration error:", migErr);
+    }
+
     // Root route
     app.get("/", (req, res) => {
       res.send("Fitness For Life Server is running...");
@@ -74,15 +98,25 @@ async function run() {
               updatedAt: new Date(),
             },
           });
+          await database.collection("user").updateOne(filter, {
+            $set: {
+              role: finalRole,
+              name: name || existingUser.name,
+              image: image || existingUser.image,
+              updatedAt: new Date(),
+            },
+          });
         } else {
-          await usersCollection.insertOne({
+          const newUserObj = {
             email,
             name: name || email.split("@")[0],
             image: image || "",
             role: finalRole,
             status: "active",
             createdAt: new Date(),
-          });
+          };
+          await usersCollection.insertOne(newUserObj);
+          await database.collection("user").insertOne(newUserObj);
         }
 
         res.json({ message: "User synced", role: finalRole });
@@ -100,7 +134,7 @@ async function run() {
           return res.json({ role: "admin", status: "active" });
         }
 
-        const userObj = await usersCollection.findOne({ email });
+        const userObj = await usersCollection.findOne({ email }) || await database.collection("user").findOne({ email });
         if (!userObj) {
           return res.json({ role: "user", status: "active" });
         }
@@ -521,8 +555,65 @@ async function run() {
     });
 
     // ==========================================
-    // ADMIN MANAGEMENT ENDPOINTS (CLASSES & FORUM)
+    // ADMIN MANAGEMENT ENDPOINTS (CLASSES & FORUM & STATS)
     // ==========================================
+
+    // 0. Get Comprehensive Admin Overview Stats
+    app.get("/api/admin/stats", async (req, res) => {
+      try {
+        const totalUsers = await usersCollection.countDocuments();
+        const totalTrainers = await usersCollection.countDocuments({ role: "trainer" });
+        const totalClasses = await classesCollection.countDocuments();
+        const pendingClasses = await classesCollection.countDocuments({ status: "Pending" });
+        const approvedClasses = await classesCollection.countDocuments({ status: "Approved" });
+        const pendingTrainerApplications = await trainerAppsCollection.countDocuments({ status: "Pending" });
+        const totalBookings = await bookingsCollection.countDocuments();
+
+        const bookings = await bookingsCollection.find().toArray();
+        const rawRevenue = bookings.reduce((sum, b) => sum + (parseFloat(b.price) || 0), 0);
+        const totalRevenue = `$${rawRevenue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+        // Category breakdown from classes collection
+        const classes = await classesCollection.find().toArray();
+        const categoryCounts = {};
+        classes.forEach((c) => {
+          const cat = c.category || "General";
+          categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+        });
+
+        const colorPalette = ["#06b6d4", "#3b82f6", "#10b981", "#8b5cf6", "#f59e0b", "#ec4899"];
+        let colorIdx = 0;
+        const categoryData = Object.keys(categoryCounts).map((catName) => ({
+          name: catName,
+          value: categoryCounts[catName],
+          color: colorPalette[colorIdx++ % colorPalette.length],
+        }));
+
+        if (categoryData.length === 0) {
+          categoryData.push(
+            { name: "HIIT & Cardio", value: 35, color: "#06b6d4" },
+            { name: "Yoga & Flex", value: 25, color: "#3b82f6" },
+            { name: "Strength", value: 20, color: "#10b981" }
+          );
+        }
+
+        res.json({
+          totalUsers,
+          totalTrainers,
+          totalClasses,
+          pendingClasses,
+          approvedClasses,
+          pendingTrainerApplications,
+          totalBookings,
+          totalRevenue,
+          rawRevenue,
+          categoryData,
+        });
+      } catch (error) {
+        console.error("Error fetching admin stats:", error);
+        res.status(500).json({ error: "Failed to fetch admin stats" });
+      }
+    });
 
     // 1. Get All Classes for Admin View
     app.get("/api/admin/classes", async (req, res) => {
