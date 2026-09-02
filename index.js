@@ -26,24 +26,17 @@ const client = new MongoClient(uri, {
   },
 });
 
-async function run() {
-  try {
-    // await client.connect();
+const database = client.db("fitnessforlife");
+const usersCollection = database.collection("users");
+const classesCollection = database.collection("classes");
+const bookingsCollection = database.collection("bookings");
+const forumPostsCollection = database.collection("forumPosts");
+const commentsCollection = database.collection("comments");
+const trainerAppsCollection = database.collection("trainerApplications");
+const favoritesCollection = database.collection("favorites");
+const sessionCollection = database.collection("session");
 
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
-
-    const database = client.db("fitnessforlife");
-    const usersCollection = database.collection("users");
-    const classesCollection = database.collection("classes");
-    const bookingsCollection = database.collection("bookings");
-    const forumPostsCollection = database.collection("forumPosts");
-    const commentsCollection = database.collection("comments");
-    const trainerAppsCollection = database.collection("trainerApplications");
-    const favoritesCollection = database.collection("favorites");
-    const sessionCollection = database.collection("session");
-
-    // Unified Middleware: Verify Better Auth Session Token (MongoDB Session Collection) or JWT Token
+// Unified Middleware: Verify Better Auth Session Token (MongoDB Session Collection) or JWT Token
     const verifyAuthSession = async (req, res, next) => {
       try {
         const authHeader = req.headers.authorization;
@@ -135,28 +128,30 @@ async function run() {
     };
 
     // Auto-migration: sync legacy accounts from 'fitness-for-life' to 'fitnessforlife' safely
-    try {
-      const oldDb = client.db("fitness-for-life");
-      const oldUsers = await oldDb.collection("user").find().toArray();
-      const oldAccounts = await oldDb.collection("account").find().toArray();
+    (async () => {
+      try {
+        const oldDb = client.db("fitness-for-life");
+        const oldUsers = await oldDb.collection("user").find().toArray();
+        const oldAccounts = await oldDb.collection("account").find().toArray();
 
-      for (const u of oldUsers) {
-        const role = u.role || (u.email?.toLowerCase() === "fitnessforlife@admin.com" ? "admin" : "user");
-        const userUpdateDoc = { ...u, role };
-        delete userUpdateDoc._id;
+        for (const u of oldUsers) {
+          const role = u.role || (u.email?.toLowerCase() === "fitnessforlife@admin.com" ? "admin" : "user");
+          const userUpdateDoc = { ...u, role };
+          delete userUpdateDoc._id;
 
-        await database.collection("user").updateOne({ email: u.email }, { $set: userUpdateDoc }, { upsert: true });
-        await database.collection("users").updateOne({ email: u.email }, { $set: userUpdateDoc }, { upsert: true });
+          await database.collection("user").updateOne({ email: u.email }, { $set: userUpdateDoc }, { upsert: true });
+          await database.collection("users").updateOne({ email: u.email }, { $set: userUpdateDoc }, { upsert: true });
+        }
+        for (const a of oldAccounts) {
+          const accUpdateDoc = { ...a };
+          delete accUpdateDoc._id;
+          await database.collection("account").updateOne({ userId: a.userId }, { $set: accUpdateDoc }, { upsert: true });
+        }
+        console.log(`✅ Synced ${oldUsers.length} users and ${oldAccounts.length} accounts to fitnessforlife database.`);
+      } catch (migErr) {
+        console.error("Migration error:", migErr);
       }
-      for (const a of oldAccounts) {
-        const accUpdateDoc = { ...a };
-        delete accUpdateDoc._id;
-        await database.collection("account").updateOne({ userId: a.userId }, { $set: accUpdateDoc }, { upsert: true });
-      }
-      console.log(`✅ Synced ${oldUsers.length} users and ${oldAccounts.length} accounts to fitnessforlife database.`);
-    } catch (migErr) {
-      console.error("Migration error:", migErr);
-    }
+    })();
 
     // Root route
     app.get("/", (req, res) => {
@@ -1325,15 +1320,10 @@ async function run() {
       }
     });
 
-  } catch (error) {
-    console.error("MongoDB Connection Error:", error);
-  }
+if (process.env.NODE_ENV !== "production" || require.main === module) {
+  app.listen(port, () => {
+    console.log(`🚀 Fitness For Life Secure Server is running on port: ${port}`);
+  });
 }
 
-run()
-  .then(() => {
-    app.listen(port, () => {
-      console.log(`🚀 Fitness For Life Secure Server is running on port: ${port}`);
-    });
-  })
-  .catch(console.dir);
+module.exports = app;
