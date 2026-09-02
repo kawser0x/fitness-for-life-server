@@ -26,22 +26,6 @@ const client = new MongoClient(uri, {
   },
 });
 
-// Middleware: Verify JWT Access Token
-const verifyJWT = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).json({ error: "Unauthorized access: No authorization token provided" });
-  }
-  const token = authHeader.split(" ")[1];
-  jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) {
-      return res.status(401).json({ error: "Unauthorized access: Invalid or expired token" });
-    }
-    req.decoded = decoded;
-    next();
-  });
-};
-
 async function run() {
   try {
     await client.connect();
@@ -57,6 +41,64 @@ async function run() {
     const commentsCollection = database.collection("comments");
     const trainerAppsCollection = database.collection("trainerApplications");
     const favoritesCollection = database.collection("favorites");
+    const sessionCollection = database.collection("session");
+
+    // Unified Middleware: Verify Better Auth Session Token (MongoDB Session Collection) or JWT Token
+    const verifyAuthSession = async (req, res, next) => {
+      try {
+        const authHeader = req.headers.authorization;
+        let token = "";
+
+        if (authHeader && authHeader.startsWith("Bearer ")) {
+          token = authHeader.split(" ")[1];
+        } else if (req.headers["x-session-token"]) {
+          token = req.headers["x-session-token"];
+        }
+
+        if (!token) {
+          return res.status(401).json({ error: "Unauthorized access: Better Auth session token required" });
+        }
+
+        // 1. Try Better Auth Session verification in MongoDB 'session' collection
+        const sessionDoc = await sessionCollection.findOne({ token });
+        if (sessionDoc) {
+          if (sessionDoc.expiresAt && new Date(sessionDoc.expiresAt) < new Date()) {
+            return res.status(401).json({ error: "Unauthorized access: Session token has expired" });
+          }
+
+          let userDoc = null;
+          if (sessionDoc.userId) {
+            if (ObjectId.isValid(sessionDoc.userId)) {
+              userDoc = await database.collection("user").findOne({ _id: new ObjectId(sessionDoc.userId) }) ||
+                        await usersCollection.findOne({ _id: new ObjectId(sessionDoc.userId) });
+            } else {
+              userDoc = await database.collection("user").findOne({ id: sessionDoc.userId }) ||
+                        await usersCollection.findOne({ id: sessionDoc.userId });
+            }
+          }
+
+          const email = userDoc?.email || sessionDoc.userEmail;
+          if (email) {
+            req.decoded = { email };
+            req.session = sessionDoc;
+            req.user = userDoc;
+            return next();
+          }
+        }
+
+        // 2. Fallback to JWT Token verification
+        jwt.verify(token, JWT_SECRET, (err, decoded) => {
+          if (err) {
+            return res.status(401).json({ error: "Unauthorized access: Invalid or expired session token" });
+          }
+          req.decoded = decoded;
+          next();
+        });
+      } catch (err) {
+        console.error("Auth session verification error:", err);
+        res.status(401).json({ error: "Unauthorized: Failed to verify authentication session" });
+      }
+    };
 
     // Middleware: Verify Super Admin Role
     const verifyAdmin = async (req, res, next) => {
@@ -118,7 +160,7 @@ async function run() {
 
     // Root route
     app.get("/", (req, res) => {
-      res.send("Fitness For Life Secure Server is running...");
+      res.send("Fitness For Life Secure Server is running with Better Auth Session Management...");
     });
 
     // ==========================================
@@ -246,11 +288,11 @@ async function run() {
     });
 
     // ==========================================
-    // USER MEMBER API ENDPOINTS (JWT Protected)
+    // USER MEMBER API ENDPOINTS (Better Auth Session Protected)
     // ==========================================
 
     // 1. Get User Dashboard Stats by Email
-    app.get("/api/user/stats/:email", verifyJWT, async (req, res) => {
+    app.get("/api/user/stats/:email", verifyAuthSession, async (req, res) => {
       try {
         const { email } = req.params;
         const totalBookedClasses = await bookingsCollection.countDocuments({ userEmail: email });
@@ -277,7 +319,7 @@ async function run() {
     });
 
     // 2. Get User Booked Classes
-    app.get("/api/user/bookings/:email", verifyJWT, async (req, res) => {
+    app.get("/api/user/bookings/:email", verifyAuthSession, async (req, res) => {
       try {
         const { email } = req.params;
         const bookings = await bookingsCollection
@@ -293,7 +335,7 @@ async function run() {
     });
 
     // 3. Create a Booking (Payment / Reservation)
-    app.post("/api/user/bookings", verifyJWT, async (req, res) => {
+    app.post("/api/user/bookings", verifyAuthSession, async (req, res) => {
       try {
         const { userEmail, classId, className, price, image, trainerName, classSchedule, transactionId } = req.body;
 
@@ -341,7 +383,7 @@ async function run() {
     });
 
     // 4. Get User Favorites
-    app.get("/api/user/favorites/:email", verifyJWT, async (req, res) => {
+    app.get("/api/user/favorites/:email", verifyAuthSession, async (req, res) => {
       try {
         const { email } = req.params;
         const favorites = await favoritesCollection
@@ -357,7 +399,7 @@ async function run() {
     });
 
     // 5. Add / Remove Favorite Toggle
-    app.post("/api/user/favorites/toggle", verifyJWT, async (req, res) => {
+    app.post("/api/user/favorites/toggle", verifyAuthSession, async (req, res) => {
       try {
         const { userEmail, classId, className, image, category, price, duration, difficultyLevel } = req.body;
 
@@ -392,11 +434,11 @@ async function run() {
     });
 
     // ==========================================
-    // TRAINER & CLASSES API ENDPOINTS (JWT & Trainer Role Protected)
+    // TRAINER & CLASSES API ENDPOINTS (Better Auth Session & Trainer Role Protected)
     // ==========================================
 
     // 1. Create a new Class (Trainer requirement: default status "Pending")
-    app.post("/api/classes", verifyJWT, verifyTrainer, async (req, res) => {
+    app.post("/api/classes", verifyAuthSession, verifyTrainer, async (req, res) => {
       try {
         const {
           className,
@@ -444,7 +486,7 @@ async function run() {
     });
 
     // 2. Get all classes created by a specific trainer
-    app.get("/api/classes/trainer/:email", verifyJWT, verifyTrainer, async (req, res) => {
+    app.get("/api/classes/trainer/:email", verifyAuthSession, verifyTrainer, async (req, res) => {
       try {
         const { email } = req.params;
         const query = { trainerEmail: email };
@@ -460,8 +502,31 @@ async function run() {
       }
     });
 
+    // 2b. Get Class Attendees / Registered Students for a specific class ID
+    app.get("/api/classes/:id/attendees", verifyAuthSession, verifyTrainer, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const bookings = await bookingsCollection
+          .find({ classId: id })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        const attendees = bookings.map((b) => ({
+          userName: b.userName || b.userEmail?.split("@")[0] || "Student",
+          userEmail: b.userEmail,
+          date: b.createdAt,
+          transactionId: b.transactionId,
+        }));
+
+        res.json(attendees);
+      } catch (error) {
+        console.error("Error fetching class attendees:", error);
+        res.status(500).json({ error: "Failed to fetch class attendees" });
+      }
+    });
+
     // 3. Get Trainer Stats
-    app.get("/api/trainer/stats/:email", verifyJWT, verifyTrainer, async (req, res) => {
+    app.get("/api/trainer/stats/:email", verifyAuthSession, verifyTrainer, async (req, res) => {
       try {
         const { email } = req.params;
 
@@ -493,7 +558,7 @@ async function run() {
     });
 
     // 4. Update a Class by ID
-    app.patch("/api/classes/:id", verifyJWT, verifyTrainer, async (req, res) => {
+    app.patch("/api/classes/:id", verifyAuthSession, verifyTrainer, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -529,7 +594,7 @@ async function run() {
     });
 
     // 5. Delete a Class by ID
-    app.delete("/api/classes/:id", verifyJWT, verifyTrainer, async (req, res) => {
+    app.delete("/api/classes/:id", verifyAuthSession, verifyTrainer, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -632,11 +697,11 @@ async function run() {
     });
 
     // ==========================================
-    // ADMIN MANAGEMENT ENDPOINTS (JWT & Admin Role Protected)
+    // ADMIN MANAGEMENT ENDPOINTS (Better Auth Session & Admin Role Protected)
     // ==========================================
 
     // 0. Get Comprehensive Admin Overview Stats
-    app.get("/api/admin/stats", verifyJWT, verifyAdmin, async (req, res) => {
+    app.get("/api/admin/stats", verifyAuthSession, verifyAdmin, async (req, res) => {
       try {
         const totalUsers = await usersCollection.countDocuments();
         const totalTrainers = await usersCollection.countDocuments({ role: "trainer" });
@@ -692,7 +757,7 @@ async function run() {
     });
 
     // 1. Get All Classes for Admin View
-    app.get("/api/admin/classes", verifyJWT, verifyAdmin, async (req, res) => {
+    app.get("/api/admin/classes", verifyAuthSession, verifyAdmin, async (req, res) => {
       try {
         const classes = await classesCollection.find().sort({ createdAt: -1 }).toArray();
         res.json(classes);
@@ -703,7 +768,7 @@ async function run() {
     });
 
     // 2. Admin Approve or Reject Class Status
-    app.patch("/api/admin/classes/:id/status", verifyJWT, verifyAdmin, async (req, res) => {
+    app.patch("/api/admin/classes/:id/status", verifyAuthSession, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -732,7 +797,7 @@ async function run() {
     });
 
     // 3. Get All Forum Posts for Admin Moderation Table
-    app.get("/api/admin/forum-posts", verifyJWT, verifyAdmin, async (req, res) => {
+    app.get("/api/admin/forum-posts", verifyAuthSession, verifyAdmin, async (req, res) => {
       try {
         const posts = await forumPostsCollection.find().sort({ createdAt: -1 }).toArray();
         res.json(posts);
@@ -742,8 +807,33 @@ async function run() {
       }
     });
 
+    // 3b. Get All Stripe Transactions (Admin)
+    app.get("/api/admin/transactions", verifyAuthSession, verifyAdmin, async (req, res) => {
+      try {
+        const bookings = await bookingsCollection
+          .find()
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        const transactions = bookings.map((b) => ({
+          _id: b._id,
+          userEmail: b.userEmail,
+          className: b.className || "Fitness Class",
+          amount: parseFloat(b.price) || 0,
+          date: b.createdAt,
+          transactionId: b.transactionId || `TXN_${b._id}`,
+          paymentStatus: b.paymentStatus || "Paid",
+        }));
+
+        res.json(transactions);
+      } catch (error) {
+        console.error("Error fetching admin transactions:", error);
+        res.status(500).json({ error: "Failed to fetch transactions" });
+      }
+    });
+
     // 4. Get All Registered Users (Admin)
-    app.get("/api/admin/users", verifyJWT, verifyAdmin, async (req, res) => {
+    app.get("/api/admin/users", verifyAuthSession, verifyAdmin, async (req, res) => {
       try {
         const users = await usersCollection.find().sort({ createdAt: -1 }).toArray();
         res.json(users);
@@ -754,7 +844,7 @@ async function run() {
     });
 
     // 5. Block / Unblock User Toggle
-    app.patch("/api/admin/users/:id/status", verifyJWT, verifyAdmin, async (req, res) => {
+    app.patch("/api/admin/users/:id/status", verifyAuthSession, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -783,7 +873,7 @@ async function run() {
     });
 
     // 6. Make Admin
-    app.patch("/api/admin/users/:id/role", verifyJWT, verifyAdmin, async (req, res) => {
+    app.patch("/api/admin/users/:id/role", verifyAuthSession, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -808,7 +898,7 @@ async function run() {
     });
 
     // 7. Submit Trainer Application
-    app.post("/api/trainer/apply", verifyJWT, async (req, res) => {
+    app.post("/api/trainer/apply", verifyAuthSession, async (req, res) => {
       try {
         const { userEmail, userName, experience, specialty, availableTime } = req.body;
 
@@ -847,7 +937,7 @@ async function run() {
     });
 
     // 8. Get All Trainer Applications
-    app.get("/api/admin/trainer-applications", verifyJWT, verifyAdmin, async (req, res) => {
+    app.get("/api/admin/trainer-applications", verifyAuthSession, verifyAdmin, async (req, res) => {
       try {
         const apps = await trainerAppsCollection.find().sort({ createdAt: -1 }).toArray();
         res.json(apps);
@@ -858,7 +948,7 @@ async function run() {
     });
 
     // 9. Review Trainer Application
-    app.patch("/api/admin/trainer-applications/:id/review", verifyJWT, verifyAdmin, async (req, res) => {
+    app.patch("/api/admin/trainer-applications/:id/review", verifyAuthSession, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -916,7 +1006,7 @@ async function run() {
     // ==========================================
 
     // 1. Create a new Forum Post
-    app.post("/api/forum", verifyJWT, verifyTrainer, async (req, res) => {
+    app.post("/api/forum", verifyAuthSession, verifyTrainer, async (req, res) => {
       try {
         const { title, image, description, authorEmail, authorName, authorRole } = req.body;
 
@@ -949,7 +1039,7 @@ async function run() {
     });
 
     // 2. Get Forum Posts authored by a specific trainer
-    app.get("/api/forum/trainer/:email", verifyJWT, verifyTrainer, async (req, res) => {
+    app.get("/api/forum/trainer/:email", verifyAuthSession, verifyTrainer, async (req, res) => {
       try {
         const { email } = req.params;
         const posts = await forumPostsCollection
@@ -1012,7 +1102,7 @@ async function run() {
     });
 
     // 5. Delete a Forum Post by ID
-    app.delete("/api/forum/:id", verifyJWT, verifyTrainer, async (req, res) => {
+    app.delete("/api/forum/:id", verifyAuthSession, verifyTrainer, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -1034,7 +1124,7 @@ async function run() {
     });
 
     // 6. Like / Dislike Vote Endpoint
-    app.post("/api/forum/:id/vote", verifyJWT, async (req, res) => {
+    app.post("/api/forum/:id/vote", verifyAuthSession, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -1099,8 +1189,8 @@ async function run() {
       }
     });
 
-    // 8. Add Comment to a Forum Post (All logged in users can comment - JWT Protected)
-    app.post("/api/forum/:id/comments", verifyJWT, async (req, res) => {
+    // 8. Add Comment to a Forum Post (All logged in users can comment - Session Protected)
+    app.post("/api/forum/:id/comments", verifyAuthSession, async (req, res) => {
       try {
         const { id } = req.params;
         const { userEmail, userName, userImage, commentText } = req.body;
@@ -1144,7 +1234,7 @@ async function run() {
     });
 
     // 9. Update own Comment by ID
-    app.patch("/api/forum/comments/:commentId", verifyJWT, async (req, res) => {
+    app.patch("/api/forum/comments/:commentId", verifyAuthSession, async (req, res) => {
       try {
         const { commentId } = req.params;
         if (!ObjectId.isValid(commentId)) {
@@ -1171,8 +1261,8 @@ async function run() {
       }
     });
 
-    // 10. Delete Comment by ID (Allowed for Comment Author, Post Author Trainer, or Admin - JWT Protected)
-    app.delete("/api/forum/comments/:commentId", verifyJWT, async (req, res) => {
+    // 10. Delete Comment by ID (Allowed for Comment Author, Post Author Trainer, or Admin - Session Protected)
+    app.delete("/api/forum/comments/:commentId", verifyAuthSession, async (req, res) => {
       try {
         const { commentId } = req.params;
         const { userEmail } = req.query;
