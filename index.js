@@ -1,12 +1,14 @@
 const express = require("express");
 const dotenv = require("dotenv");
 const cors = require("cors");
+const jwt = require("jsonwebtoken");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 dotenv.config();
 
 const stripeKey = process.env.STRIPE_SECRET_KEY || "sk_test_51Q...dummy_secret_key";
 const stripe = require("stripe")(stripeKey);
+const JWT_SECRET = process.env.ACCESS_TOKEN_SECRET || "fitness_for_life_jwt_secret_key_2026";
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -24,6 +26,22 @@ const client = new MongoClient(uri, {
   },
 });
 
+// Middleware: Verify JWT Access Token
+const verifyJWT = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ error: "Unauthorized access: No authorization token provided" });
+  }
+  const token = authHeader.split(" ")[1];
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(401).json({ error: "Unauthorized access: Invalid or expired token" });
+    }
+    req.decoded = decoded;
+    next();
+  });
+};
+
 async function run() {
   try {
     await client.connect();
@@ -39,6 +57,40 @@ async function run() {
     const commentsCollection = database.collection("comments");
     const trainerAppsCollection = database.collection("trainerApplications");
     const favoritesCollection = database.collection("favorites");
+
+    // Middleware: Verify Super Admin Role
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded?.email;
+      if (!email) {
+        return res.status(403).json({ error: "Forbidden access: Email missing in token" });
+      }
+      if (email.toLowerCase() === "admin@ironpulse.com") {
+        return next();
+      }
+      const user = await usersCollection.findOne({ email });
+      if (user && user.role === "admin") {
+        next();
+      } else {
+        return res.status(403).json({ error: "Forbidden access: Super Admin privilege required" });
+      }
+    };
+
+    // Middleware: Verify Certified Trainer Role
+    const verifyTrainer = async (req, res, next) => {
+      const email = req.decoded?.email;
+      if (!email) {
+        return res.status(403).json({ error: "Forbidden access: Email missing in token" });
+      }
+      if (email.toLowerCase() === "admin@ironpulse.com") {
+        return next();
+      }
+      const user = await usersCollection.findOne({ email });
+      if (user && (user.role === "trainer" || user.role === "admin")) {
+        next();
+      } else {
+        return res.status(403).json({ error: "Forbidden access: Certified Trainer privilege required" });
+      }
+    };
 
     // Auto-migration: sync legacy accounts from 'fitness-for-life' to 'fitnessforlife' safely
     try {
@@ -66,7 +118,20 @@ async function run() {
 
     // Root route
     app.get("/", (req, res) => {
-      res.send("Fitness For Life Server is running...");
+      res.send("Fitness For Life Secure Server is running...");
+    });
+
+    // ==========================================
+    // JWT TOKEN GENERATION ENDPOINT
+    // ==========================================
+
+    app.post("/api/jwt", async (req, res) => {
+      const { email } = req.body;
+      if (!email) {
+        return res.status(400).json({ error: "Email required for JWT token generation" });
+      }
+      const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: "7d" });
+      res.json({ token });
     });
 
     // ==========================================
@@ -107,7 +172,6 @@ async function run() {
         const { email, role, name, image } = req.body;
         if (!email) return res.status(400).json({ error: "User email required" });
 
-        // Hardcoded admin email override per specs
         let finalRole = role || "user";
         if (email.toLowerCase() === "admin@ironpulse.com") {
           finalRole = "admin";
@@ -117,7 +181,6 @@ async function run() {
         const existingUser = await usersCollection.findOne(filter);
 
         if (existingUser) {
-          // If existing user already has a specific role (like admin or approved trainer), keep it unless explicitly changing to trainer
           if (existingUser.role && existingUser.role !== "user" && finalRole === "user") {
             finalRole = existingUser.role;
           }
@@ -183,11 +246,11 @@ async function run() {
     });
 
     // ==========================================
-    // USER MEMBER API ENDPOINTS
+    // USER MEMBER API ENDPOINTS (JWT Protected)
     // ==========================================
 
     // 1. Get User Dashboard Stats by Email
-    app.get("/api/user/stats/:email", async (req, res) => {
+    app.get("/api/user/stats/:email", verifyJWT, async (req, res) => {
       try {
         const { email } = req.params;
         const totalBookedClasses = await bookingsCollection.countDocuments({ userEmail: email });
@@ -214,7 +277,7 @@ async function run() {
     });
 
     // 2. Get User Booked Classes
-    app.get("/api/user/bookings/:email", async (req, res) => {
+    app.get("/api/user/bookings/:email", verifyJWT, async (req, res) => {
       try {
         const { email } = req.params;
         const bookings = await bookingsCollection
@@ -230,7 +293,7 @@ async function run() {
     });
 
     // 3. Create a Booking (Payment / Reservation)
-    app.post("/api/user/bookings", async (req, res) => {
+    app.post("/api/user/bookings", verifyJWT, async (req, res) => {
       try {
         const { userEmail, classId, className, price, image, trainerName, classSchedule, transactionId } = req.body;
 
@@ -238,7 +301,6 @@ async function run() {
           return res.status(400).json({ error: "User email and class ID required" });
         }
 
-        // Soft Block check
         const userObj = await usersCollection.findOne({ email: userEmail });
         if (userObj && userObj.status === "blocked") {
           return res.status(403).json({ error: "Action restricted by Admin" });
@@ -264,7 +326,6 @@ async function run() {
 
         const result = await bookingsCollection.insertOne(newBooking);
 
-        // Increment booking count on class document
         if (ObjectId.isValid(classId)) {
           await classesCollection.updateOne(
             { _id: new ObjectId(classId) },
@@ -280,7 +341,7 @@ async function run() {
     });
 
     // 4. Get User Favorites
-    app.get("/api/user/favorites/:email", async (req, res) => {
+    app.get("/api/user/favorites/:email", verifyJWT, async (req, res) => {
       try {
         const { email } = req.params;
         const favorites = await favoritesCollection
@@ -296,7 +357,7 @@ async function run() {
     });
 
     // 5. Add / Remove Favorite Toggle
-    app.post("/api/user/favorites/toggle", async (req, res) => {
+    app.post("/api/user/favorites/toggle", verifyJWT, async (req, res) => {
       try {
         const { userEmail, classId, className, image, category, price, duration, difficultyLevel } = req.body;
 
@@ -331,11 +392,11 @@ async function run() {
     });
 
     // ==========================================
-    // TRAINER & CLASSES API ENDPOINTS
+    // TRAINER & CLASSES API ENDPOINTS (JWT & Trainer Role Protected)
     // ==========================================
 
     // 1. Create a new Class (Trainer requirement: default status "Pending")
-    app.post("/api/classes", async (req, res) => {
+    app.post("/api/classes", verifyJWT, verifyTrainer, async (req, res) => {
       try {
         const {
           className,
@@ -383,7 +444,7 @@ async function run() {
     });
 
     // 2. Get all classes created by a specific trainer
-    app.get("/api/classes/trainer/:email", async (req, res) => {
+    app.get("/api/classes/trainer/:email", verifyJWT, verifyTrainer, async (req, res) => {
       try {
         const { email } = req.params;
         const query = { trainerEmail: email };
@@ -400,7 +461,7 @@ async function run() {
     });
 
     // 3. Get Trainer Stats
-    app.get("/api/trainer/stats/:email", async (req, res) => {
+    app.get("/api/trainer/stats/:email", verifyJWT, verifyTrainer, async (req, res) => {
       try {
         const { email } = req.params;
 
@@ -432,7 +493,7 @@ async function run() {
     });
 
     // 4. Update a Class by ID
-    app.patch("/api/classes/:id", async (req, res) => {
+    app.patch("/api/classes/:id", verifyJWT, verifyTrainer, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -468,7 +529,7 @@ async function run() {
     });
 
     // 5. Delete a Class by ID
-    app.delete("/api/classes/:id", async (req, res) => {
+    app.delete("/api/classes/:id", verifyJWT, verifyTrainer, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -488,23 +549,7 @@ async function run() {
       }
     });
 
-    // 6. View Attendees / Students for a specific class
-    app.get("/api/classes/:id/attendees", async (req, res) => {
-      try {
-        const { id } = req.params;
-        const attendees = await bookingsCollection
-          .find({ classId: id })
-          .sort({ date: -1 })
-          .toArray();
-
-        res.json(attendees);
-      } catch (error) {
-        console.error("Error fetching class attendees:", error);
-        res.status(500).json({ error: "Failed to fetch attendees" });
-      }
-    });
-
-    // 7. Get Single Class Details by ID
+    // 6. Get Single Class Details by ID
     app.get("/api/classes/details/:id", async (req, res) => {
       try {
         const { id } = req.params;
@@ -524,7 +569,7 @@ async function run() {
       }
     });
 
-    // 8. Get All Public Approved Classes
+    // 7. Get All Public Approved Classes
     app.get("/api/classes", async (req, res) => {
       try {
         const { status, search, category, page = 1, limit = 10 } = req.query;
@@ -566,7 +611,7 @@ async function run() {
       }
     });
 
-    // 9. Get Single Class Details by ID (Direct Route /api/classes/:id)
+    // 8. Get Single Class Details by ID (Direct Route /api/classes/:id)
     app.get("/api/classes/:id", async (req, res) => {
       try {
         const { id } = req.params;
@@ -587,11 +632,11 @@ async function run() {
     });
 
     // ==========================================
-    // ADMIN MANAGEMENT ENDPOINTS (CLASSES & FORUM & STATS)
+    // ADMIN MANAGEMENT ENDPOINTS (JWT & Admin Role Protected)
     // ==========================================
 
     // 0. Get Comprehensive Admin Overview Stats
-    app.get("/api/admin/stats", async (req, res) => {
+    app.get("/api/admin/stats", verifyJWT, verifyAdmin, async (req, res) => {
       try {
         const totalUsers = await usersCollection.countDocuments();
         const totalTrainers = await usersCollection.countDocuments({ role: "trainer" });
@@ -605,7 +650,6 @@ async function run() {
         const rawRevenue = bookings.reduce((sum, b) => sum + (parseFloat(b.price) || 0), 0);
         const totalRevenue = `$${rawRevenue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-        // Category breakdown from classes collection
         const classes = await classesCollection.find().toArray();
         const categoryCounts = {};
         classes.forEach((c) => {
@@ -648,7 +692,7 @@ async function run() {
     });
 
     // 1. Get All Classes for Admin View
-    app.get("/api/admin/classes", async (req, res) => {
+    app.get("/api/admin/classes", verifyJWT, verifyAdmin, async (req, res) => {
       try {
         const classes = await classesCollection.find().sort({ createdAt: -1 }).toArray();
         res.json(classes);
@@ -659,7 +703,7 @@ async function run() {
     });
 
     // 2. Admin Approve or Reject Class Status
-    app.patch("/api/admin/classes/:id/status", async (req, res) => {
+    app.patch("/api/admin/classes/:id/status", verifyJWT, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -688,7 +732,7 @@ async function run() {
     });
 
     // 3. Get All Forum Posts for Admin Moderation Table
-    app.get("/api/admin/forum-posts", async (req, res) => {
+    app.get("/api/admin/forum-posts", verifyJWT, verifyAdmin, async (req, res) => {
       try {
         const posts = await forumPostsCollection.find().sort({ createdAt: -1 }).toArray();
         res.json(posts);
@@ -699,7 +743,7 @@ async function run() {
     });
 
     // 4. Get All Registered Users (Admin)
-    app.get("/api/admin/users", async (req, res) => {
+    app.get("/api/admin/users", verifyJWT, verifyAdmin, async (req, res) => {
       try {
         const users = await usersCollection.find().sort({ createdAt: -1 }).toArray();
         res.json(users);
@@ -710,7 +754,7 @@ async function run() {
     });
 
     // 5. Block / Unblock User Toggle
-    app.patch("/api/admin/users/:id/status", async (req, res) => {
+    app.patch("/api/admin/users/:id/status", verifyJWT, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -739,7 +783,7 @@ async function run() {
     });
 
     // 6. Make Admin
-    app.patch("/api/admin/users/:id/role", async (req, res) => {
+    app.patch("/api/admin/users/:id/role", verifyJWT, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -764,7 +808,7 @@ async function run() {
     });
 
     // 7. Submit Trainer Application
-    app.post("/api/trainer/apply", async (req, res) => {
+    app.post("/api/trainer/apply", verifyJWT, async (req, res) => {
       try {
         const { userEmail, userName, experience, specialty, availableTime } = req.body;
 
@@ -772,7 +816,6 @@ async function run() {
           return res.status(400).json({ error: "Missing required application fields" });
         }
 
-        // Soft block check for trainer application
         const userObj = await usersCollection.findOne({ email: userEmail });
         if (userObj && userObj.status === "blocked") {
           return res.status(403).json({ error: "Action restricted by Admin" });
@@ -804,7 +847,7 @@ async function run() {
     });
 
     // 8. Get All Trainer Applications
-    app.get("/api/admin/trainer-applications", async (req, res) => {
+    app.get("/api/admin/trainer-applications", verifyJWT, verifyAdmin, async (req, res) => {
       try {
         const apps = await trainerAppsCollection.find().sort({ createdAt: -1 }).toArray();
         res.json(apps);
@@ -815,7 +858,7 @@ async function run() {
     });
 
     // 9. Review Trainer Application
-    app.patch("/api/admin/trainer-applications/:id/review", async (req, res) => {
+    app.patch("/api/admin/trainer-applications/:id/review", verifyJWT, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -868,10 +911,12 @@ async function run() {
       }
     });
 
+    // ==========================================
     // COMMUNITY FORUM API ENDPOINTS
+    // ==========================================
 
     // 1. Create a new Forum Post
-    app.post("/api/forum", async (req, res) => {
+    app.post("/api/forum", verifyJWT, verifyTrainer, async (req, res) => {
       try {
         const { title, image, description, authorEmail, authorName, authorRole } = req.body;
 
@@ -904,7 +949,7 @@ async function run() {
     });
 
     // 2. Get Forum Posts authored by a specific trainer
-    app.get("/api/forum/trainer/:email", async (req, res) => {
+    app.get("/api/forum/trainer/:email", verifyJWT, verifyTrainer, async (req, res) => {
       try {
         const { email } = req.params;
         const posts = await forumPostsCollection
@@ -967,7 +1012,7 @@ async function run() {
     });
 
     // 5. Delete a Forum Post by ID
-    app.delete("/api/forum/:id", async (req, res) => {
+    app.delete("/api/forum/:id", verifyJWT, verifyTrainer, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -989,7 +1034,7 @@ async function run() {
     });
 
     // 6. Like / Dislike Vote Endpoint
-    app.post("/api/forum/:id/vote", async (req, res) => {
+    app.post("/api/forum/:id/vote", verifyJWT, async (req, res) => {
       try {
         const { id } = req.params;
         if (!ObjectId.isValid(id)) {
@@ -1054,8 +1099,8 @@ async function run() {
       }
     });
 
-    // 8. Add Comment to a Forum Post (All logged in users can comment)
-    app.post("/api/forum/:id/comments", async (req, res) => {
+    // 8. Add Comment to a Forum Post (All logged in users can comment - JWT Protected)
+    app.post("/api/forum/:id/comments", verifyJWT, async (req, res) => {
       try {
         const { id } = req.params;
         const { userEmail, userName, userImage, commentText } = req.body;
@@ -1099,7 +1144,7 @@ async function run() {
     });
 
     // 9. Update own Comment by ID
-    app.patch("/api/forum/comments/:commentId", async (req, res) => {
+    app.patch("/api/forum/comments/:commentId", verifyJWT, async (req, res) => {
       try {
         const { commentId } = req.params;
         if (!ObjectId.isValid(commentId)) {
@@ -1126,8 +1171,8 @@ async function run() {
       }
     });
 
-    // 10. Delete Comment by ID (Allowed for Comment Author, Post Author Trainer, or Admin)
-    app.delete("/api/forum/comments/:commentId", async (req, res) => {
+    // 10. Delete Comment by ID (Allowed for Comment Author, Post Author Trainer, or Admin - JWT Protected)
+    app.delete("/api/forum/comments/:commentId", verifyJWT, async (req, res) => {
       try {
         const { commentId } = req.params;
         const { userEmail } = req.query;
@@ -1173,7 +1218,7 @@ async function run() {
 run()
   .then(() => {
     app.listen(port, () => {
-      console.log(`🚀 Fitness For Life Server is running on port: ${port}`);
+      console.log(`🚀 Fitness For Life Secure Server is running on port: ${port}`);
     });
   })
   .catch(console.dir);
