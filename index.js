@@ -5,6 +5,9 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 dotenv.config();
 
+const stripeKey = process.env.STRIPE_SECRET_KEY || "sk_test_51Q...dummy_secret_key";
+const stripe = require("stripe")(stripeKey);
+
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -64,6 +67,34 @@ async function run() {
     // Root route
     app.get("/", (req, res) => {
       res.send("Fitness For Life Server is running...");
+    });
+
+    // ==========================================
+    // STRIPE PAYMENT INTENT ENDPOINT
+    // ==========================================
+
+    app.post("/api/create-payment-intent", async (req, res) => {
+      try {
+        const { price } = req.body;
+        const amount = Math.round((parseFloat(price) || 0) * 100);
+
+        if (amount <= 0) {
+          return res.status(400).json({ error: "Invalid payment amount" });
+        }
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount,
+          currency: "usd",
+          payment_method_types: ["card"],
+        });
+
+        res.json({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (error) {
+        console.error("Stripe PaymentIntent error:", error);
+        res.status(500).json({ error: error.message || "Failed to create Stripe PaymentIntent" });
+      }
     });
 
     // ==========================================
@@ -201,7 +232,7 @@ async function run() {
     // 3. Create a Booking (Payment / Reservation)
     app.post("/api/user/bookings", async (req, res) => {
       try {
-        const { userEmail, classId, className, price, image, trainerName, classSchedule } = req.body;
+        const { userEmail, classId, className, price, image, trainerName, classSchedule, transactionId } = req.body;
 
         if (!userEmail || !classId) {
           return res.status(400).json({ error: "User email and class ID required" });
@@ -226,6 +257,7 @@ async function run() {
           image: image || "",
           trainerName: trainerName || "Certified Trainer",
           classSchedule: classSchedule || "Schedule TBD",
+          transactionId: transactionId || `TXN_${Date.now()}`,
           paymentStatus: "Paid",
           createdAt: new Date(),
         };
@@ -240,7 +272,7 @@ async function run() {
           );
         }
 
-        res.status(201).json({ message: "Booking confirmed", insertedId: result.insertedId });
+        res.status(201).json({ message: "Booking confirmed", insertedId: result.insertedId, transactionId: newBooking.transactionId });
       } catch (error) {
         console.error("Error creating booking:", error);
         res.status(500).json({ error: "Failed to process booking" });
