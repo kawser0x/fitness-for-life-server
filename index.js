@@ -1054,7 +1054,7 @@ async function run() {
       }
     });
 
-    // 8. Add Comment to a Forum Post
+    // 8. Add Comment to a Forum Post (All logged in users can comment)
     app.post("/api/forum/:id/comments", async (req, res) => {
       try {
         const { id } = req.params;
@@ -1069,11 +1069,23 @@ async function run() {
           return res.status(403).json({ error: "Action restricted by Admin" });
         }
 
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid Post ID" });
+        }
+
+        const post = await forumPostsCollection.findOne({ _id: new ObjectId(id) });
+        if (!post) return res.status(404).json({ error: "Forum post not found" });
+
+        const userRole = (userEmail.toLowerCase() === "admin@ironpulse.com" || authorUser?.role === "admin")
+          ? "Admin"
+          : (authorUser?.role === "trainer" ? "Trainer" : "Member");
+
         const newComment = {
           postId: id,
           userEmail,
           userName: userName || "Member",
           userImage: userImage || "/assets/logo.png",
+          userRole,
           commentText,
           createdAt: new Date(),
         };
@@ -1114,13 +1126,32 @@ async function run() {
       }
     });
 
-    // 10. Delete own Comment by ID
+    // 10. Delete Comment by ID (Allowed for Comment Author, Post Author Trainer, or Admin)
     app.delete("/api/forum/comments/:commentId", async (req, res) => {
       try {
         const { commentId } = req.params;
+        const { userEmail } = req.query;
+
         if (!ObjectId.isValid(commentId)) {
           return res.status(400).json({ error: "Invalid Comment ID" });
         }
+
+        const comment = await commentsCollection.findOne({ _id: new ObjectId(commentId) });
+        if (!comment) return res.status(404).json({ error: "Comment not found" });
+
+        if (userEmail) {
+          const post = await forumPostsCollection.findOne({ _id: new ObjectId(comment.postId) });
+          const requester = await usersCollection.findOne({ email: userEmail });
+
+          const isCommentAuthor = comment.userEmail?.toLowerCase() === userEmail.toLowerCase();
+          const isPostAuthor = post && post.authorEmail?.toLowerCase() === userEmail.toLowerCase();
+          const isAdmin = userEmail.toLowerCase() === "admin@ironpulse.com" || (requester && requester.role === "admin");
+
+          if (!isCommentAuthor && !isPostAuthor && !isAdmin) {
+            return res.status(403).json({ error: "Only the comment author, post author (Trainer), or Admin can delete this message." });
+          }
+        }
+
         const result = await commentsCollection.deleteOne({ _id: new ObjectId(commentId) });
 
         if (result.deletedCount === 0) {
