@@ -28,7 +28,7 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
 
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
@@ -141,7 +141,7 @@ async function run() {
       const oldAccounts = await oldDb.collection("account").find().toArray();
 
       for (const u of oldUsers) {
-        const role = u.role || (u.email?.toLowerCase() === "admin@ironpulse.com" ? "admin" : "user");
+        const role = u.role || (u.email?.toLowerCase() === "fitnessforlife@admin.com" ? "admin" : "user");
         const userUpdateDoc = { ...u, role };
         delete userUpdateDoc._id;
 
@@ -163,9 +163,7 @@ async function run() {
       res.send("Fitness For Life Secure Server is running with Better Auth Session Management...");
     });
 
-    // ==========================================
     // JWT TOKEN GENERATION ENDPOINT
-    // ==========================================
 
     app.post("/api/jwt", async (req, res) => {
       const { email } = req.body;
@@ -176,9 +174,7 @@ async function run() {
       res.json({ token });
     });
 
-    // ==========================================
     // STRIPE PAYMENT INTENT ENDPOINT
-    // ==========================================
 
     app.post("/api/create-payment-intent", async (req, res) => {
       try {
@@ -204,9 +200,7 @@ async function run() {
       }
     });
 
-    // ==========================================
     // AUTHENTICATION & USER SYNC ENDPOINTS
-    // ==========================================
 
     // 1. Sync User Role and Details upon Signup/Login
     app.post("/api/user/sync", async (req, res) => {
@@ -215,7 +209,7 @@ async function run() {
         if (!email) return res.status(400).json({ error: "User email required" });
 
         let finalRole = role || "user";
-        if (email.toLowerCase() === "admin@ironpulse.com") {
+        if (email.toLowerCase() === "fitnessforlife@admin.com") {
           finalRole = "admin";
         }
 
@@ -266,7 +260,7 @@ async function run() {
     app.get("/api/user/role/:email", async (req, res) => {
       try {
         const { email } = req.params;
-        if (email.toLowerCase() === "admin@ironpulse.com") {
+        if (email.toLowerCase() === "fitnessforlife@admin.com") {
           return res.json({ role: "admin", status: "active" });
         }
 
@@ -287,9 +281,7 @@ async function run() {
       }
     });
 
-    // ==========================================
     // USER MEMBER API ENDPOINTS (Better Auth Session Protected)
-    // ==========================================
 
     // 1. Get User Dashboard Stats by Email
     app.get("/api/user/stats/:email", verifyAuthSession, async (req, res) => {
@@ -433,9 +425,7 @@ async function run() {
       }
     });
 
-    // ==========================================
     // TRAINER & CLASSES API ENDPOINTS (Better Auth Session & Trainer Role Protected)
-    // ==========================================
 
     // 1. Create a new Class (Trainer requirement: default status "Pending")
     app.post("/api/classes", verifyAuthSession, verifyTrainer, async (req, res) => {
@@ -696,9 +686,7 @@ async function run() {
       }
     });
 
-    // ==========================================
     // ADMIN MANAGEMENT ENDPOINTS (Better Auth Session & Admin Role Protected)
-    // ==========================================
 
     // 0. Get Comprehensive Admin Overview Stats
     app.get("/api/admin/stats", verifyAuthSession, verifyAdmin, async (req, res) => {
@@ -1001,9 +989,7 @@ async function run() {
       }
     });
 
-    // ==========================================
     // COMMUNITY FORUM API ENDPOINTS
-    // ==========================================
 
     // 1. Create a new Forum Post
     app.post("/api/forum", verifyAuthSession, verifyTrainer, async (req, res) => {
